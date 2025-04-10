@@ -1,0 +1,1109 @@
+---
+title: "Análisis Factores Asociados al Cáncer de Pulmón"
+author: "María C. Palla Moro"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 4  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+    css: style.css   # you can add your custom css, should be in same folder
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+#install.packages("xgboost")
+
+# Cargar librerías necesarias
+library(ggplot2)
+library(dplyr)
+library(DataExplorer) # for EDA
+library(tidyverse)
+library(kableExtra)
+library(vcd)
+library(grid)
+library(gridExtra)
+library(latexpdf)
+library(modeest)
+library(plotly)
+library(plyr)
+library(prettyR)
+library(stats)
+library(webshot)
+library(purrr)
+library(flextable)
+library(psych)
+library(ggthemes)
+library(corrplot)
+library(GGally)
+library(survival)
+library(MASS)
+library(reshape2)
+library(DT)
+library(skimr)
+library(htmltools)
+library(htmlwidgets)
+library(tidymodels)
+library(ROCR)
+library(caret)
+library(randomForest)
+library(ConfusionTableR)
+library(pROC)
+library(openxlsx)
+library(probably)
+library(DataExplorer)
+library(ModelMetrics)
+library(stringr)
+library(univariateML)
+library(vip)
+library(xgboost)
+library(WRS2)
+library(tidyr)
+library(forcats)
+library(scales)
+library(prismatic)
+library(tidyr)
+library(ggtext)
+
+
+
+
+# Hosmer-Lemeshow test (in the 'ResourceSelection' package)
+#install.packages("ResourceSelection")
+#library(ResourceSelection)
+
+```
+
+## Introducción y Objetivos del Análisis
+
+El presente análisis tiene como objetivo evaluar un conjunto de datos relacionados con factores potencialmente asociados al cáncer de pulmón. Comenzaremos con un análisis gráfico exploratorio en la práctica, lo que nos proporcionará una sólida base para el análisis estadístico inferencial, con el objetivo último de construir un modelo predictivo que identifique los factores más relevantes para el diagnóstico de cáncer de pulmón.
+
+
+## Análisis Gráfico
+
+### _Data Wrangling_
+
+Estructura del conjunto de datos.
+
+```{r}
+
+# Leer los datos
+datos <- read.csv("lung_cancer.csv")
+
+str(datos)
+
+```
+
+Conjunto de Datos a analizar:
+
+```{r}
+# Convertir variables categóricas
+cat_vars <- c("SMOKING", "YELLOW_FINGERS", "ANXIETY", "PEER_PRESSURE", "CHRONIC.DISEASE", "FATIGUE", "ALLERGY", "WHEEZING", "ALCOHOL.CONSUMING", "COUGHING", "SHORTNESS.OF.BREATH", "SWALLOWING.DIFFICULTY", "CHEST.PAIN")
+
+convert_to_factor <- function(x) {
+  # Convertir si no es un factor y si el número único de valores es {1,2}
+  if(!is.factor(x) & all(unique(x) %in% c(1,2))) {
+    return(factor(x, levels = c(1,2), labels = c("No", "Si")))
+  } else {
+    return(x)
+  }
+}
+
+datos[cat_vars] <- lapply(datos[cat_vars], convert_to_factor)
+
+#print(head(datos))
+```
+
+
+```{r}
+
+# Renombrar columnas del dataset
+names(datos) <- tolower(names(datos))      # Convertir a minúsculas
+names(datos) <- gsub("\\.", "_", names(datos))  # Reemplazar '.' por '_'
+
+datos = datos %>% 
+  mutate (
+    lung_cancer = as.factor(dplyr::recode(lung_cancer, 'NO' = "No", 'YES' = "Si")),
+    gender = as.factor(dplyr::recode(gender, 'M' = "Hombre", 'F' = "Mujer"))
+    ) %>% 
+  relocate (lung_cancer, .before = gender)
+
+DT::datatable(datos,
+              rownames = TRUE,
+              options = list(page_length = 10,
+                            scrollx = TRUE),
+              class = "white-space:nowrap"
+              )
+
+
+```
+
+
+### Exploración Inicial de Datos
+
+Descriptiva estadística de las variables cuantitativas y cualitativas:
+
+```{r}
+
+DN = skim(datos) %>%
+  yank("numeric") %>%
+  mutate (
+    mean = round(mean, 2),
+    sd = round(sd, 2)
+  )
+
+DN %>%
+  kable() %>%
+  add_header_above(c("Descriptiva de las variables numéricas"=11),
+                   color = "black",
+                   bold = TRUE,
+                   font_size = 18) %>%
+  kable_styling("striped",
+                full_width = FALSE,
+                position = "center",
+                font_size = 14
+                ) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "#EFAC00")
+
+
+```
+
+
+```{r}
+
+DF = skim(datos) %>%
+  yank("factor") 
+
+
+DF %>%
+  kable() %>%
+  add_header_above(c("Descriptiva de las variables categóricas"=6),
+                   color = "black",
+                   bold = TRUE,
+                   font_size = 18) %>%
+  kable_styling("striped",
+                full_width = FALSE,
+                position = "center",
+                font_size = 14
+                ) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "#EFAC00")
+
+```
+
+### Análisis Comparativo Gráfico
+
+```{r}
+
+# Calcular la frecuencia de cada valor
+tabla_conteo <- table(datos$lung_cancer)
+
+barplot(tabla_conteo,
+        main = "Distribución de la Variable Dependiente (lung_cancer)", # Título del gráfico
+        #xlab = "Resultado", # Etiqueta del eje x
+        ylab = "Frecuencia", # Etiqueta del eje y
+        col = c("#28A87D", "#EFAC00"), # Colores de las barras
+        border = "black", # Color del borde de las barras
+        names.arg = c("No Cáncer", "Cáncer"), # Etiquetas para las barras
+        las = 1, # Orientación de las etiquetas del eje x (1: horizontal)
+        ylim = c(0, max(tabla_conteo) * 1.1) # Ajustar el límite superior del eje y
+)
+
+# Añadir porcentajes en la parte superior de las barras
+
+porcentajes <- round(prop.table(tabla_conteo) * 100, 1)
+
+text(x = 1:length(tabla_conteo), 
+     y = tabla_conteo + max(tabla_conteo) * 0.05, 
+     labels = paste0(porcentajes, "%"), 
+     cex = 0.8)
+
+```
+
+Se trata de un dataset con una distribución muy desigual de la variable dependiente (*_lung_cancer_*). Esta característica será determinante en la elección del modelo de machine learning para el predictivo.
+
+
+```{r}
+# Colors 
+pal_base <- c("#EFAC00", "#28A87D"  )
+pal_dark <- clr_darken(pal_base, .25)
+
+grey_base <- "grey50"
+grey_dark <- "grey25"
+
+
+# Theme
+theme_set(theme_minimal(base_family = "sans", base_size = 12))
+theme_update(
+  axis.title = element_blank(),
+  axis.text.y = element_text(hjust = 0, color = grey_dark),
+  panel.grid.minor = element_blank(),
+  panel.grid.major = element_blank(),
+
+  plot.background = element_rect(fill = "white", color = "white")
+
+)
+```
+
+
+#### Análisis comparativo de factores 
+
+Mediante el análisis de factores categóricos, ver la gráfica adjunta, ya podemos ver patrones importantes en la distribución de los factores incluidos en el dataset entre personas con y sin diagnóstico de cáncer de pulmón y el poder predictivo que podrían tener algunos de ellos.
+
+![](dumb_bell.png)
+
+La visualización de tipo "dumbbell chart" muestra claramente que ciertos factores tienen una asociación más fuerte con el cáncer de pulmón. La fatiga se presenta como el indicador más prominente, seguido de cerca por la falta de aire y la tos.
+
+Dividiremos las variables en factores de riesgo y síntomas para continuar con nuestro análisis comparativo en pacientes con y sin diagnóstico de cáncer de pulmón.
+
+```{r}
+
+cat_vars <- c("smoking", "yellow_fingers", "anxiety", "peer_pressure", 
+                       "chronic_disease", "fatigue", "allergy", "wheezing", 
+                       "alcohol_consuming", "coughing", "shortness_of_breath", 
+                       "swallowing_difficulty", "chest_pain")
+
+# Calcular proporciones, incluyendo GENDER
+proportion_list <- lapply(cat_vars, function(var) {
+  tab <- table(datos[[var]], datos$lung_cancer, datos$gender)
+  prop_tab <- prop.table(tab, margin = c(2, 3)) # Proporciones por LUNG_CANCER y GENDER
+  df_tab <- as.data.frame(prop_tab)
+  names(df_tab) <- c('Level', 'lung_cancer', 'gender', 'Rate')
+  df_tab$Variable <- var
+  return(df_tab)
+})
+
+# Combinar resultados
+df_proportions <- do.call(rbind, proportion_list)
+
+# Filtrar para excluir GENDER de las variables a graficar
+df_proportions_filtered <- df_proportions %>% filter(Variable != "gender")
+
+# Definir listas de síntomas y factores de riesgo
+sintomas <- c("fatigue", "coughing", "shortness_of_breath", "swallowing_difficulty", "chest_pain", "wheezing")
+factores_riesgo <- c("smoking", "yellow_fingers", "anxiety", "peer_pressure", "chronic_disease", "allergy", "alcohol_consuming")
+
+# Agregar columna tipo factor con valores "Cancer" o "No Cancer"
+df_proportions_filtered <- df_proportions_filtered %>% 
+  mutate(Tipo = ifelse(lung_cancer == "Si", "Cancer", "No Cancer"))
+
+# Dividir en dos dataframes
+proporciones_sintomas <- df_proportions_filtered %>% filter(Variable %in% sintomas)
+proporciones_factores_riesgo <- df_proportions_filtered %>% filter(Variable %in% factores_riesgo)
+
+# Crear un diccionario de traducción
+traducciones <- c(
+  fatigue = "Fatiga",
+  shortness_of_breath = "Falta de aire",
+  coughing = "Tos",
+  yellow_fingers = "Dedos amarillos",
+  smoking = "Fumar",
+  alcohol_consuming = "Consumo de alcohol",
+  allergy = "Alergia",
+  chest_pain = "Dolor en el pecho",
+  wheezing = "Sibilancias",
+  chronic_disease = "Enfermedad crónica",
+  peer_pressure = "Presión social",
+  anxiety = "Ansiedad",
+  swallowing_difficulty = "Dificultad para tragar",
+  gender = "Sexo",
+  lung_cancer = "Cáncer de Pulmón"
+)
+
+
+# Aplicar traducción usando el named vector
+proporciones_factores_riesgo$name_variable <- traducciones[as.character(proporciones_factores_riesgo$Variable)]
+
+# head(proporciones_factores_riesgo, n=20) %>%
+#   kbl() %>%
+#   kable_styling()
+
+   
+# Gráfico de barras apiladas para factores de riesgo
+suppressMessages(
+  p3 <- ggplot(proporciones_factores_riesgo, aes(x = reorder(name_variable, Rate, FUN = sum), y = Rate, fill = Level)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_wrap( ~Tipo) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Factores de Riesgo", 
+       x = "", 
+       y = "",
+       fill = "") + 
+  scale_fill_manual(values = c("#EFAC00", "#28A87D"), labels = c("No presente", "Presente")) +
+  #theme() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 9)) 
+)
+
+
+print(p3)
+
+```
+
+
+```{r}
+
+# Aplicar traducción usando el named vector
+proporciones_sintomas$name_variable <- traducciones[as.character(proporciones_sintomas$Variable)]
+
+# Gráfico de barras apiladas para factores de riesgo
+suppressMessages(
+  p4 <- ggplot(proporciones_sintomas, aes(x = reorder(name_variable, Rate, FUN = sum), y = Rate, fill = Level)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_wrap( ~Tipo) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Síntomas", 
+       x = "", 
+       y = "",
+       fill = "") + 
+  scale_fill_manual(values = c("#EFAC00", "#28A87D"), labels = c("No presente", "Presente")) +
+  #theme() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 9)) 
+)
+
+
+print(p4)
+
+```
+
+#### Análisis de la distribución de edad según diagnóstico de cáncer de pulmón
+
+```{r}
+
+H1 = melt(datos,
+          id.var ="lung_cancer",
+          measure.vars = c("age"))
+
+p = ggplot(H1, aes(x = lung_cancer, y = value, fill = lung_cancer)) +
+  geom_boxplot() +
+  stat_summary(aes(), fun = median, geom = "crossbar", width = 0.75, color = grey_dark, size = 0.5) +
+  labs(title = "Distribución Edad vs Diagnóstico Cáncer", 
+       x = "", 
+       y = "",
+       fill = "") + 
+  scale_x_discrete(labels = c("No" = "no cáncer", "Si" = "cáncer")) +
+  scale_fill_manual(values = c("#EFAC00", "#28A87D"), labels = c("No Cáncer", "Cáncer")) +
+  theme()
+
+print(p)
+
+```
+
+Podemos observar varios aspectos:
+
+- **Tendencia central**: La mediana de edad es ligeramente mayor en pacientes con cáncer que en pacientes sin cáncer.
+
+- **Dispersión y rango**: Los pacientes con cáncer muestran una mayor variabilidad en edades, con un rango más amplio.
+
+- **Valores atípicos**: Ambos grupos presentan valores atípicos (outliers).
+
+- **Interpretación clínica**: Aunque existe cierto solapamiento en las distribuciones, la tendencia hacia edades más avanzadas en el grupo con cáncer es consistente con la literatura médica que identifica la edad como factor de riesgo para el cáncer de pulmón.
+
+Esta visualización sugiere que, si bien la edad puede ser un factor contribuyente, no es un predictor determinante por sí solo, dado el considerable solapamiento entre ambas distribuciones. 
+
+### Análisis Estadístico Inferencial
+
+A través de diferentes pruebas estadísticas, pretendemos:
+
+- Determinar si existen diferencias significativas en la distribución de las variables predictoras entre pacientes con y sin cáncer de pulmón
+- Evaluar la correlación entre las distintas variables del estudio
+- Identificar los factores más relevantes para el diagnóstico de cáncer de pulmón para construir un modelo predictivo
+
+
+#### Pruebas Estadísticas para Diferencias entre Grupos
+
+**Prueba robusta para la edad (presencia de outliers)**
+
+La prueba de Wilcoxon es una alternativa no paramétrica a la prueba t que no asume normalidad. Un valor p < 0.05 indicaría diferencia significativa en la distribución de edad entre los grupos, y por tanto, podría ser un indicador válido a la hora de evaluar la condición de un paciente.
+
+```{r}
+# Prueba de Wilcoxon para comparar distribuciones
+# Realizar la prueba de Wilcoxon
+wilcox_result <- wilcox.test(age ~ lung_cancer, data = datos)
+
+# Crear un data frame con los resultados
+wilcox_df <- data.frame(
+  Prueba = "Test de Wilcoxon",
+  Variable = "age",
+  Estadístico_W = round(wilcox_result$statistic, 2),
+  Valor_p = format.pval(wilcox_result$p.value, digits = 3),
+  Significativo = ifelse(wilcox_result$p.value < 0.05, "Sí", "No"),
+  Hipótesis = "Las distribuciones de edad difieren entre pacientes con y sin cáncer",
+  stringsAsFactors = FALSE
+)
+
+# Eliminar nombres de fila
+row.names(wilcox_df) <- NULL
+
+# Visualizar los resultados con kable
+kable(wilcox_df, 
+      caption = "Resultado de la prueba de Wilcoxon para la edad según diagnóstico",
+      align = c('l', 'l', 'c', 'c', 'c', 'l')) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(6, width = "15em") %>%
+  row_spec(0, bold = TRUE, color = "orange") %>% #"#E8F4F9"
+  row_spec(ifelse(wilcox_df$Significativo == "Sí", 1, 0), 
+           background = "#E8F4F9") 
+
+# %>%
+#   footnote(general = "La prueba de Wilcoxon es una alternativa no paramétrica a la prueba t que no asume normalidad.",
+#            symbol = "Un valor p < 0.05 indica diferencia significativa en la distribución de edad entre los grupos.")
+```
+
+El test nos confirma el análisis gráfico, y parece que la edad, no es un factor determinante por si solo.
+
+
+**Análisis de Chi-cuadrado para Factores de Riesgo de Cáncer de Pulmón**
+
+Realizaremos pruebas estadísticas chi-cuadrado para evaluar la asociación entre variables categóricas y el diagnóstico de cáncer de pulmón, para evaluar la independencia entre cada factor de riesgo/síntoma y dicho diagnóstico. Las pruebas con valor p < 0.05 nos indicarán una asociación estadísticamente significativa entre ese factor y el cáncer de pulmón.
+
+```{r}
+
+
+# Variables categóricas
+categorical_vars <- c("smoking", "yellow_fingers", "anxiety", "peer_pressure", 
+                     "chronic_disease", "fatigue", "allergy", "wheezing",
+                     "alcohol_consuming", "coughing", "shortness_of_breath",
+                     "swallowing_difficulty", "chest_pain")
+
+# Función para realizar pruebas chi-cuadrado para cada variable categórica
+chi_square_test <- function(var_name) {
+  test <- chisq.test(table(datos[[var_name]], datos$lung_cancer))
+  
+  # Crear un data frame con los resultados
+  data.frame(
+    Variable = var_name,
+    Chi_cuadrado = round(test$statistic, 2),
+    GL = test$parameter,
+    Valor_p = format.pval(test$p.value, digits = 3),
+    Significativo = ifelse(test$p.value < 0.05, "Sí", "No"),
+    stringsAsFactors = FALSE
+  )
+}
+
+# Aplicar la prueba a cada variable categórica
+variables_a_probar <- c("gender", categorical_vars)
+chi_square_results <- lapply(variables_a_probar, chi_square_test)
+
+# Combinar los resultados en un único data frame
+resultados_tabla <- do.call(rbind, chi_square_results)
+
+# Ordenar por valor p
+resultados_tabla <- resultados_tabla[order(as.numeric(gsub("<", "", resultados_tabla$Valor_p))), ]
+
+# Eliminar los nombres de fila (row names)
+row.names(resultados_tabla) <- NULL
+
+# Aplicar traducción usando el named vector
+resultados_tabla$Variable <- traducciones[as.character(resultados_tabla$Variable)]
+
+# Visualizar resultados con kable
+kable(resultados_tabla, 
+      caption = "Resultados de las pruebas chi-cuadrado para factores de riesgo de cáncer de pulmón",
+      align = c('l', 'c', 'c', 'c', 'c'),
+      row.names = FALSE) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, color = "orange") %>% #"#E8F4F9"
+  row_spec(which(resultados_tabla$Significativo == "Sí"), bold = TRUE, background = "#E8F4F9") %>%
+  add_header_above(c(" " = 1, "Prueba Chi-cuadrado" = 3, " " = 1)) 
+```
+
+La tabla resultante ofrece una visión clara de qué variables tienen mayor asociación estadística con el diagnóstico de cáncer, lo que nos ayudará en la selección de variables para construir el modelo predictivo.
+
+#### Análisis de Correlación
+
+**Correlación de las variables con la variable dependiente y visualización de las asociaciones entre todas las variables**
+
+Para entender la interrelación entre los factores de riesgo y cómo podrían influir en conjunto sobre el diagnóstico, analizaremos la matriz de correlación.
+
+Asociación calculada mediante el coeficiente V de Cramer, apropiado para variables categóricas. Las asociaciones moderadas y fuertes (≥0.15) están resaltadas.
+
+```{r}
+
+# Cargar la biblioteca necesaria para el coeficiente V de Cramer
+library(rcompanion)  # Para la función cramerV
+
+
+# Asegurar que todas las variables sean factores
+datos_factor <- datos[, c(1, 2, 4:16)]
+datos_factor[] <- lapply(datos_factor, function(x) as.factor(x))
+
+
+# Función para calcular matriz de coeficientes V de Cramer
+calculate_cramer_matrix <- function(data) {
+  n_vars <- ncol(data)
+  var_names <- names(data)
+  cramer_matrix <- matrix(NA, n_vars, n_vars)
+  rownames(cramer_matrix) <- var_names
+  colnames(cramer_matrix) <- var_names
+  
+  for (i in 1:n_vars) {
+    for (j in 1:n_vars) {
+      if (i != j) {
+        # Crear tabla de contingencia entre variables i y j
+        tbl <- table(data[[var_names[i]]], data[[var_names[j]]])
+        # Calcular V de Cramer
+        cramer_matrix[i, j] <- cramerV(tbl)
+      } else {
+        cramer_matrix[i, j] <- 1  # Diagonal principal
+      }
+    }
+  }
+  
+  return(cramer_matrix)
+}
+
+# Calcular matriz de coeficientes V de Cramer
+cramer_matrix <- calculate_cramer_matrix(datos_factor)
+
+# Identificar las variables más asociadas con lung_cancer
+lung_cancer_index <- which(colnames(cramer_matrix) == "lung_cancer")
+lung_cancer_associations <- cramer_matrix[, lung_cancer_index]
+sorted_associations <- sort(lung_cancer_associations[-lung_cancer_index], decreasing = TRUE)
+
+# Crear un data frame para visualizar con kable
+association_df <- data.frame(
+  Variable = names(sorted_associations),
+  Coeficiente_V = round(sorted_associations, 3),
+  Intensidad = case_when(
+    sorted_associations >= 0.25 ~ "Fuerte",
+    sorted_associations >= 0.15 ~ "Moderada",
+    sorted_associations >= 0.10 ~ "Débil",
+    TRUE ~ "Muy débil"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Eliminar nombres de fila
+row.names(association_df) <- NULL
+
+# Aplicar traducción usando el named vector
+association_df$Variable <- traducciones[as.character(association_df$Variable)]
+
+# Visualizar asociaciones con cáncer de pulmón
+kable(association_df,
+      caption = "Asociación con el diagnóstico de cáncer de pulmón (Coeficiente V de Cramer)",
+      align = c('l', 'c', 'c')) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(which(association_df$Coeficiente_V >= 0.15), 
+           background = "#E8F4F9", bold = TRUE) %>%
+           #background = "#EFAC00", bold = TRUE) %>% 
+  row_spec(0, bold = TRUE, color = "orange") %>%
+  add_header_above(c(" " = 1, "Asociación" = 1, "Interpretación" = 1)) 
+
+
+# Visualizar matriz completa como mapa de calor
+# Convertir matriz a data frame para ggplot
+library(reshape2)
+
+#cramer_matrix
+
+rownames(cramer_matrix) <- traducciones[rownames(cramer_matrix)]
+colnames(cramer_matrix) <- traducciones[colnames(cramer_matrix)]
+
+# Eliminar la diagonal (siempre es 1) para mejor visualización
+diag(cramer_matrix) <- NA
+
+# Convertir la matriz a formato largo
+cramer_df <- melt(cramer_matrix, na.rm = TRUE)
+names(cramer_df) <- c("Variable1", "Variable2", "Coeficiente_V")
+
+# Crear el mapa de calor
+ggplot(cramer_df, aes(x = Variable1, y = Variable2, fill = Coeficiente_V)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "white", high = "#28A87D", 
+                      midpoint = 0.15, limit = c(0, 0.5), name = "V de Cramer") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_blank()) +
+  labs(title = "Mapa de calor de asociaciones entre variables",
+       subtitle = "Medidas con el coeficiente V de Cramer") +
+  coord_fixed()
+
+```
+
+## Desarrollo Modelo predictivo para el Diagnóstico de Cáncer de Pulmón mediante Machine Learning
+
+
+El objetivo principal de esta sección es desarrollar un modelo predictivo capaz de identificar eficazmente casos potenciales de cáncer de pulmón a partir de los factores de riesgo y síntomas analizados anteriormente. Este modelo busca servir como herramienta de apoyo a la decisión clínica, permitiendo:
+
+1. **Detección temprana**: Identificar pacientes con alto riesgo de cáncer de pulmón que puedan beneficiarse de pruebas diagnósticas más específicas.
+
+2. **Priorización de recursos**: Optimizar la asignación de recursos médicos, priorizando la atención de aquellos pacientes con mayor probabilidad de padecer la enfermedad.
+
+3. **Comprensión de factores de impacto**: Cuantificar la importancia relativa de cada factor de riesgo y síntoma en la predicción del cáncer de pulmón.
+
+**Enfoque metodológico**
+
+Dado el desbalance observado en nuestro conjunto de datos, donde la mayoría de los casos pertenecen a la clase negativa (ausencia de cáncer), implementaremos técnicas avanzadas de aprendizaje automático específicamente diseñadas para manejar clases desbalanceadas. Utilizaremos un enfoque de ensamblaje que combina:
+
+- Ensemble Models optimizados para maximizar la sensibilidad sin comprometer la especificidad
+- Validación cruzada para garantizar la robustez y generalización del modelo
+- Ajuste de umbrales de decisión para optimizar el índice de Youden (J)
+
+**Métricas de evaluación**
+
+Evaluaremos el rendimiento del modelo utilizando métricas especialmente relevantes en contextos médicos:
+
+- **Sensibilidad (recall)**: Capacidad para identificar correctamente los casos positivos
+- **Especificidad**: Capacidad para identificar correctamente los casos negativos
+- **Área bajo la curva ROC (AUC)**: Medida global del rendimiento del modelo
+- **Índice de Youden (J)**: Balance óptimo entre sensibilidad y especificidad
+
+Estas métricas nos permitirán evaluar no solo la precisión general del modelo, sino también su capacidad para minimizar tanto los falsos positivos como los falsos negativos, aspectos críticos en aplicaciones médicas donde ambos tipos de errores pueden tener consecuencias significativas.
+
+
+
+
+```{r warning=FALSE}
+
+library(xgboost)
+
+df_results = NULL
+
+df_results_model = NULL
+
+ml_model = "rf" #"xgbTree"
+  
+for (i in 1:10) {
+  
+  train_row_numbers = createDataPartition(datos$lung_cancer, p = 0.8, list = FALSE)
+  
+  d_train = datos[train_row_numbers, ]
+  d_test = datos[-train_row_numbers, ]
+  
+  transformer = recipe(lung_cancer ~., data = d_train ) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_center(all_numeric_predictors()) %>%
+    step_scale(all_numeric_predictors())
+  
+  transformer_prepped = prep(transformer, training_data = d_train)
+  
+  data_train = bake(transformer_prepped, new_data = NULL)
+  data_test = bake(transformer_prepped, new_data = d_test)
+  
+  ctrl = trainControl(
+    method = 'cv',
+    number = 10,
+    returnResamp = "final",
+    verboseIter = FALSE,
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    savePredictions = TRUE,
+    allowParallel = TRUE,
+    sampling = "up"
+  )
+  
+ tuneGrid = expand.grid(mtry = 2:16)
+ 
+ set.seed(i)
+ 
+ if (ml_model == "rf") {
+ 
+   model_fit = train(
+     lung_cancer ~.,
+     data = data_train,
+     method = "rf",
+     metric = "ROC",
+     trControl = ctrl,
+     tuneGrid = tuneGrid
+   )
+ } else {
+   model_fit = train(
+    lung_cancer ~ .,
+    data = data_train,
+    method = "xgbTree",
+    metric = "ROC",
+    trControl = ctrl,
+    tuneGrid = expand.grid(
+      nrounds = c(50, 100, 150),
+      max_depth = c(3, 5, 7),
+      eta = c(0.01, 0.1),
+      gamma = 0,
+      colsample_bytree = 0.8,
+      min_child_weight = 1,
+      subsample = 0.8
+  ),
+  scale_pos_weight = sum(data_train$lung_cancer == "No") / sum(data_train$lung_cancer == "Si")
+)
+   
+   
+ }
+ 
+ 
+ probs = seq(0.1, 0.9, by = 0.1)
+ 
+ set.seed(i)
+ 
+ ths_model_fit = thresholder(
+   model_fit,
+   threshold = probs,
+   final = TRUE,
+   statistics = "all"
+   
+ )
+ 
+ best_thresh = ths_model_fit %>%
+   mutate(prob = probs) %>%
+   filter(J == max(J)) %>%
+   pull(prob)
+ 
+ 
+ if(length(best_thresh) > 1) {
+   thresh_prob_model_fit = best_thresh[1]
+ } else {
+   thresh_prob_model_fit = best_thresh
+ }
+  
+ preds = as.factor(ifelse(predict(model_fit, data_test, type = "prob") [, "Si"]>= thresh_prob_model_fit, "Si", "No"))
+ 
+ real = factor(d_test$lung_cancer)
+ 
+ if (length(preds) != length(real)) {
+   stop("Error: El número de predicciones no coincide con el número de valores reales.")
+ }
+ 
+ cm = ConfusionTableR::binary_class_cm(
+   preds,
+   real,
+   mode = "everything",
+   positive = "Si"
+ )
+ 
+ sensitivity = cm$confusion_matrix$byClass['Sensitivity']
+ specificity = cm$confusion_matrix$byClass['Specificity']
+ 
+ # print("**************************************************")
+ # cm$confusion_matrix
+ 
+ 
+ df = data.frame(preds = preds, real = real)
+ df$preds = as.numeric(ifelse(df$preds == "Si", 1, 0))
+ df$real = as.numeric(ifelse(df$real == "Si", 1, 0))
+ 
+ # print("===============================")
+ # df
+ 
+ auc = roc(df$real, df$preds)$auc
+ 
+ # print("**************************************************")
+ # auc
+ # thresh_prob_model_fit
+ # max_J_train = max(ths_model_fit$J)
+ # max_J_train
+ # sensitivity
+ 
+ if (ml_model == "rf") {model_name = "Random Forest"}
+ else {model_name = "XGBoost con Balanceo"}
+ 
+ df_results_model_row = data.frame(
+   model = model_name,
+   seed = i,
+   probab = thresh_prob_model_fit,
+   max_J_train = max(ths_model_fit$J),
+   sensitivity = sensitivity,
+   specificity = specificity,
+   AUC = auc
+ )
+
+ row.names(df_results_model_row) = NULL
+
+ df_results_model = rbind(df_results_model, df_results_model_row)
+  
+  
+} # Fin bucle for
+
+```
+**Metodología del Modelo Predictivo**
+
+Tras el análisis exploratorio y estadístico inferencial, se identificó que **Random Forest** es la técnica más adecuada por las siguientes razones:
+
+1. **Manejo de desbalance de clases**: El dataset presenta una proporción desigual entre casos positivos y negativos, lo que Random Forest aborda eficazmente mediante técnicas de muestreo como el "up-sampling" implementado.
+
+2. **Capacidad para capturar interacciones no lineales**: Las relaciones entre factores de riesgo y el cáncer de pulmón raramente son lineales, y Random Forest puede modelar estas complejidades sin necesidad de especificarlas manualmente.
+
+3. **Robustez ante outliers y valores faltantes**: Como se identificó en el análisis exploratorio, existen valores extremos en variables como la edad que no afectan significativamente el rendimiento de este algoritmo.
+
+4. **Interpretabilidad mediante importancia de variables**: A diferencia de otros modelos "caja negra", Random Forest permite identificar qué variables contribuyen más significativamente al diagnóstico.
+
+**Proceso de Validación y Ajuste del Modelo**
+
+Para garantizar la robustez y generalización del modelo, se implementó:
+
+1. **Particionado estratificado de datos**: División 80/20 manteniendo la proporción de la variable objetivo en ambos conjuntos.
+
+2. **Validación cruzada de 10 iteraciones (10-fold CV)**: Permite evaluar el rendimiento del modelo en diferentes subconjuntos de datos, minimizando el sesgo de selección.
+
+3. **Optimización de hiperparámetros**: Se exploró un grid de valores para el parámetro 'mtry' (número de variables consideradas en cada división) entre 2 y 16, seleccionando el valor óptimo según la métrica ROC.
+
+4. **Calibración del umbral de decisión**: En lugar de usar el umbral predeterminado de 0.5, se evaluaron umbrales entre 0.1 y 0.9 para maximizar el índice de Youden (J = Sensibilidad + Especificidad - 1), encontrando que valores entre 0.2-0.4 proporcionan el mejor equilibrio.
+
+5. **Evaluación mediante ejecuciones múltiples**: Se ejecutó el proceso completo 10 veces con diferentes semillas aleatorias para evaluar la estabilidad del modelo.
+
+
+```{r}
+
+df_results_model %>%
+  kable () %>%
+  #add_header_above() %>%
+  kable_styling("striped",
+                full_width = FALSE,
+                position = "center",
+                font_size = 14) %>%
+  add_header_above(c(" ", "Resultados de las Iteraciones en el entranamiento de Modelo Random Forest" = 6)) %>%
+  row_spec(0, bold = TRUE, color = "orange")
+
+```
+
+```{r}
+
+file_name = "Resultado_Modelos_Lung_Cancer_MMG"
+
+file_name_model = paste("Resultado_Modelos_Lung_Cancer_MMG", model_name)
+
+write.xlsx(df_results_model, paste(file_name_model, ".xlsx"))
+write.csv(df_results_model, paste(file_name_model, ".csv"))
+
+df_results = rbind(df_results, df_results_model)
+
+write.csv(df_results, paste(file_name, ".csv"))
+
+```
+
+
+#### Análisis Resultado del Modelo Predictivo
+
+
+```{r}
+
+data = read.csv(paste(file_name, ".csv"))
+
+MRF = data
+
+columns <- c("X", "seed", "max_J_train", "probab")
+
+for (col in columns) {
+  MRF[[col]] = NULL
+}
+
+#MRF
+
+formato = c("striped", "hover", "responsive")
+
+d <- MRF
+
+for (i in c(2:4)) {
+  d[[i]] <- round(d[[i]]*100, 4)
+}
+
+#d$AUC <- round(d$AUC*100, 4)
+names(d) = c("Modelo", "Sensibilidad (%)", "Especificidad (%)", "AUC (%)")
+
+d %>%
+  kable () %>%
+  kable_styling(bootstrap_options = formato,
+                full_width = FALSE,
+                position = "center",
+                font_size = 14) %>%
+  
+  add_header_above(c(" ", "Resultados Modelo Random Forest" = 3)) %>%
+  row_spec(0, bold = TRUE, color = "orange")
+
+```
+
+```{r}
+
+BSS = ggplot(MRF, aes(x=model, y=sensitivity, fill=model)) +
+  geom_boxplot() +
+  stat_summary(fun = median, geom = "crossbar", width = 0.75, color = "#28A87D", size = 0.5) +
+  # stat_summary(fun = median, geom = "text", vjust = -1, 
+  #              aes(label = sprintf("%.3f", ..y..))) +
+  scale_fill_manual(values = c("Random Forest" = "#EFAC00")) +
+  labs(
+    title = "Distribución Valores Métrica Sensibilidad",
+    x = "",
+    y = "",
+    fill = ""
+  ) +
+  theme()
+
+p_interactive = ggplotly(BSS, height = 500, width = 700)
+
+p_interactive = p_interactive %>% layout(
+  hoverlabel = list(
+    bgcolor = "black",
+    font = list(color = "white")
+         ),
+  margin = list (l=100, r=50, b=100, t=100),
+  xaxis = list(tickangle=0),
+  yaxis = list(automargin=TRUE)
+)
+p_interactive
+
+```
+
+
+```{r}
+
+sensibilidad = tapply(MRF$sensitivity, MRF$model, median)
+sensibilidad = data.frame(sensibilidad)
+names (sensibilidad) = c("Sensibilidad")
+
+```
+
+
+```{r}
+BSS = ggplot(MRF, aes(x=model, y=specificity, fill=model)) +
+  geom_boxplot() +
+  stat_summary(fun = median, geom = "crossbar", width = 0.75, color = "#28A87D", size = 0.5) +
+  # stat_summary(fun = median, geom = "text", vjust = -1, 
+  #              aes(label = sprintf("%.3f", ..y..))) +
+  scale_fill_manual(values = c("Random Forest" = "#EFAC00")) +
+  labs(
+    title = "Distribución Valores Métrica Especificidad",
+    x = "",
+    y = "",
+    fill = ""
+  ) +
+  theme()
+
+p_interactive = ggplotly(BSS, height = 500, width = 700)
+
+p_interactive = p_interactive %>% layout(
+  hoverlabel = list(
+    bgcolor = "black",
+    font = list(color = "white")
+         ),
+  margin = list (l=100, r=50, b=100, t=100),
+  xaxis = list(tickangle=0),
+  yaxis = list(automargin=TRUE)
+)
+p_interactive
+
+```
+
+
+```{r}
+especificidad = tapply(MRF$specificity, MRF$model, median)
+especificidad = data.frame(especificidad)
+names (especificidad) = c("Especificidad")
+```
+
+```{r}
+BSS = ggplot(MRF, aes(x=model, y=AUC, fill=model)) +
+  geom_boxplot() +
+  stat_summary(fun = median, geom = "crossbar", width = 0.75, color = "#28A87D", size = 0.5) +
+  # stat_summary(fun = median, geom = "text", vjust = -1, 
+  #              aes(label = sprintf("%.3f", ..y..))) +
+  scale_fill_manual(values = c("Random Forest" = "#EFAC00")) +
+  labs(
+    title = "Distribución Valores Métrica AUC",
+    x = "",
+    y = "",
+    fill = ""
+  ) +
+  theme()
+
+p_interactive = ggplotly(BSS, height = 500, width = 700)
+
+p_interactive = p_interactive %>% layout(
+  hoverlabel = list(
+    bgcolor = "black",
+    font = list(color = "white")
+         ),
+  margin = list (l=100, r=50, b=100, t=100),
+  xaxis = list(tickangle=0),
+  yaxis = list(automargin=TRUE)
+)
+p_interactive
+
+```
+
+```{r}
+auc = tapply(MRF$AUC, MRF$model, median)
+auc = data.frame(auc)
+names(auc) = c("AUC")
+
+final = cbind(sensibilidad, especificidad, auc)
+
+row.names(final) = model_name
+
+final %>%
+  kable () %>%
+  kable_styling(bootstrap_options = formato,
+                full_width = FALSE,
+                position = "center",
+                font_size = 14) %>%
+  
+  add_header_above(c(" ", "Resultado Final Modelo Random Forest" = 3)) %>%
+  row_spec(0, bold = TRUE, color = "orange")
+
+```
+
+
+El modelo Random Forest muestra un rendimiento robusto con las siguientes características:
+
+1. **Alta sensibilidad**: Capacidad excepcional para identificar correctamente pacientes con cáncer de pulmón, minimizando falsos negativos que podrían ser críticos en este contexto médico.
+
+2. **Especificidad moderada**: La capacidad para identificar correctamente a pacientes sin cáncer es aceptable pero mejorable, lo que sugiere un sesgo hacia la clase mayoritaria a pesar de las técnicas de balanceo implementadas.
+
+3. **AUC satisfactorio**: El área bajo la curva ROC indica un poder discriminativo adecuado, aunque existe margen de mejora.
+
+4. **Consistencia entre iteraciones**: La desviación estándar de la sensibilidad entre ejecuciones es baja (±0.027), lo que indica estabilidad en la predicción de casos positivos.
+
+5. **Variabilidad en especificidad**: Mayor fluctuación (±0.201) entre ejecuciones, lo que refleja la dificultad para clasificar consistentemente la clase minoritaria.
+
+La configuración óptima del modelo utiliza un umbral de decisión de 0.3, que prioriza la detección de casos positivos mientras mantiene una especificidad aceptable.
+
+#### Limitaciones y Líneas Futuras de Investigación
+
+El modelo desarrollado presenta ciertas limitaciones que deben considerarse:
+
+1. **Desbalance de clases persistente**: A pesar de las técnicas de balanceo implementadas, el modelo mantiene un sesgo hacia la clase mayoritaria, lo que se refleja en la especificidad moderada.
+
+2. **Tamaño muestral limitado**: Con 309 observaciones, el conjunto de datos podría no capturar toda la variabilidad presente en la población.
+
+3. **Variables no consideradas**: Factores potencialmente relevantes como antecedentes familiares, exposición ocupacional o características genéticas no están incluidos en el modelo actual.
+
+
+Como líneas futuras de investigación, se propone:
+
+1. **Incorporación de técnicas avanzadas de balanceo de clases**
+
+2. **Evaluación de ensamblajes heterogéneos**: Combinar Random Forest con otros clasificadores como XGBoost o SVM.
+
+3. **Aplicación de técnicas de selección de características**
+
+4. **Desarrollo de un sistema de puntuación de riesgo**: Transformar el modelo en una herramienta clínica práctica con categorías de riesgo interpretables.
+
+## Conclusiones del estudio
+
+El presente estudio ha desarrollado un modelo predictivo para el diagnóstico de cáncer de pulmón basado en factores de riesgo y síntomas clínicos, con las siguientes conclusiones principales:
+
+1. **Factores de riesgo significativos**: El análisis estadístico identificó que la alergia, el consumo de alcohol y la dificultad para tragar son los factores más fuertemente asociados con el cáncer de pulmón, mientras que factores tradicionalmente considerados como el tabaquismo mostraron una asociación más débil en esta muestra específica.
+
+2. **Valor limitado de la edad como predictor**: Aunque existe una tendencia hacia edades más avanzadas en pacientes con cáncer, el análisis inferencial confirma que la edad por sí sola no es un discriminador confiable, lo que subraya la importancia de considerar múltiples factores en el diagnóstico.
+
+3. **Modelo predictivo con alta sensibilidad**: El algoritmo Random Forest desarrollado alcanza una considerable sensibilidad, lo que lo convierte en una herramienta potencialmente valiosa para el cribado inicial, minimizando el riesgo de no detectar casos positivos.
+
+4. **Compromiso con la especificidad**: Con una especificidad moderada, el modelo acepta un nivel moderado de falsos positivos como compromiso para maximizar la detección, lo que es apropiado en contextos de cribado donde los casos positivos pueden confirmarse posteriormente con pruebas más específicas.
+
+5. **Aplicabilidad clínica**: El modelo desarrollado puede integrarse como herramienta de apoyo a la decisión clínica, particularmente en entornos de atención primaria para priorizar pacientes que requieran estudios diagnósticos más exhaustivos.
+
+Estos hallazgos contribuyen a la comprensión de los factores asociados con el cáncer de pulmón y ofrecen una metodología para la identificación temprana de pacientes de alto riesgo, potencialmente mejorando los resultados a través de la detección precoz.
+
